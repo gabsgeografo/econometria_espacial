@@ -1,0 +1,525 @@
+# Painel espacial - guardas municipais 
+
+## Pacotes
+
+#O pacote `plm` eh responsavel pelos painéis convencionais (não espaciais) que usaremos para comparar. O pacote `splm`eh responsável pelos painéis espaciais. 
+# instalar plm e splm
+```{r}
+library(plm)
+library(splm)
+library(spdep)
+library(spatialreg)
+```
+
+## Shapefile
+# Puxar o arquivo shp pelo pacote 'rgdal' 
+
+```{r}
+# Pacotes
+library(rgdal)
+
+guarda.shp <- readOGR("C:/Users/Positivo/Desktop/EconometriaEspacial/AugustaRaiher/PainelEspacial/guarda", "guarda", encoding = "ISO-8859-1")
+
+# Plotar o mapa
+plot(guarda.shp)
+```
+
+## Dados
+# Uma olhada nos dados.
+
+```{r}
+str(guarda.shp@data) #O comando str indica as variaveis do shapefile
+head(guarda.shp@data) #Indica as colunas e as primeiras linhas do arquivo dbf no formato tabela
+```
+
+## Filtrando dados
+# Vamos separar algumas variaveis para usarmos no modelo - extraio do shapefile os dados para ficar mais leve, ai vou selecionar as variaveis que eu quero no modelo. 
+# Importante colocar o codigo do municipio e as variaveis em pares (por exemplo, se vou fazer o painel em 5 anos tenho que ter todas as variaveis em cinco anos)
+
+```{r}
+#Seleciona as variaveis - a criterio do programador
+dados <- guarda.shp@data #Cria um novo objeto
+dados <- subset(dados, select=c("CODMUN6","RENDA00", "RENDA10", "THEIL00","THEIL10"))
+
+#Visualizacao dos dados - a escolha entre tabela ou linha eh a criterio do programador
+str (dados) 
+head(dados)
+```
+
+## Matriz de vizinhanca
+
+# Para rodar os paineis espaciais, vamos precisar de uma matriz de vizinhanca.
+# Para isso, usamos o pacote spdep - ja chamado anteriormente
+
+```{r}
+#MATRIZ RAINHA E TORRE PADRONIZADAS
+w1 <- nb2listw(poly2nb(guarda.shp, queen = TRUE),style="W") #w1 = Rainha
+w2 <- nb2listw(poly2nb(guarda.shp, queen = FALSE),style="W") #w2 = Torre
+```
+
+```{r}
+#MATRIZ K-VIZINHOS MAIS PROXIMOS (K-NEAREST NEIGHBORS):
+coords <- coordinates(guarda.shp) #Identifica as coordenadas
+IDs <- row.names(guarda.shp@data)
+w5 <- nb2listw(knn2nb(knearneigh(coords, k=1),row.names=IDs),style="W") #o valor de "k" indica a qtde de vizinhos
+```
+
+## Variaveis defasadas espacialmente - nao eh automatico para criar variaveis defasadas, temos que fazer a variavel defasada. Temos que defasa-la antes de empilhar - defasagem com o lag espacial
+## Defasa a partir da matriz de vizinhanca
+```{r}
+dados$LAGRENDA00 <- lag.listw(w5, dados$RENDA00) #"lag" indica a defasagem - o "$" inclui a coluna
+dados$LAGRENDA10 <- lag.listw(w5, dados$RENDA10)
+head(dados)
+```
+
+```{r}
+str (dados)
+head (dados)
+```
+
+
+## Empilhar dados
+# Para empilhar os dados de modo automatico, vamos precisar que a base de dados tenha uma organizacao basica.
+# * O primeiro campo deve ser o de identificacao; (ID, ou codigo, cod_mun....)
+# Os nomes das vari?veis devem conter a especificacao da variavel e o ano, algo como "PIB2000" e "PIB2010".
+# Nao devem existir outras variaveis alem da identificacao e dados do painel.
+
+# Vejamos a base de dados do exemplo.
+
+```{r}
+names(dados)
+```
+
+# Para colocar os dados em painel, criamos uma funcao. Veja abaixo.
+# A funcao reshape
+
+```{r}
+painel <- function(id, dados){
+  require(reshape2)
+  
+  dadosp <- reshape2::melt(dados, id=id)
+  dadosp$varname <- as.character(gsub("[[:digit:]]", "", dadosp$variable))
+  dadosp$year <-  as.character(gsub("[[:alpha:]]", "", dadosp$variable))
+  
+  sp <- split(dadosp, f = dadosp$varname)
+  
+  dadosp <- data.frame(sp[[1]][,1], sp[[1]]$year)
+  
+  for(i in 1:length(sp)){
+    dadosp <- cbind(dadosp, sp[[i]]$value)
+  }
+  
+  names(dadosp) <- c("id","ano",names(sp)) #Importante indicar a ordem 
+  
+  return(dadosp) #o "p" no final indica que os dados serao organizados em painel
+}
+```
+
+# Depois de declarada, vamos colocar os dados em painel.
+
+```{r}
+install.packages("reshape2") # O pacote reshape2 eh uma atualizacao nova do r
+library(reshape2)
+dadosp <- painel("CODMUN6", dados) #Nao deve se esquecer de indicar a variavel do municipio (pode ser COD, ID, NUM)
+View(dadosp)
+
+table(dadosp$id)
+```
+
+## Especificacao do modelo
+
+```{r}
+esp <- THEIL ~ RENDA # Expressa que a Desigualdade (Theil) em funcao da Renda
+# A variavel dependente vem ANTES do til "~"
+# Para expressar mais variaveis deve se colocar "NOME_VARIAVEL" "+" "NOME_VARIAVEL"
+```
+
+## Modelo nao-espacial de Efeitos Fixos
+
+```{r}
+fe <- plm(esp, data=dadosp) #"fe" indica "fixed effect" ("efeito fixo")
+summary(fe) #Apresenta os resultados do teste s/ efeito espacial (PLM)
+```
+
+#  teste CHOW, TESTE F = DECISÃO ENTRE EFEITO FIXO E POOLED (MQO)
+# Realiza o teste F para efeitos individuais
+
+```{r}
+reg.pooled=plm(esp,data=dadosp, model="pooling")
+fe <- plm(esp, data=dadosp)
+pFtest(fe,reg.pooled)
+```
+
+## Modelo nao espacial de efeitos aleatorios
+
+```{r}
+re <- plm(esp, data=dadosp, model="random") #"re" india o efeito aleatorio
+summary(re)
+```
+
+## Teste de Hausman
+
+### Original
+
+```{r}
+ph <- phtest(fe, re) # H0: efeitos aleatorios
+print(ph)
+```
+
+# Hausman Spatial Test = O teste de Hausman é usado para comparar os estimadores de efeitos fixos com os aleatórios para saber se a pressuposição de efeitos aleatórios é aceita pelos dados. Os estimadores do modelo "within" são comparados com o GLS espacial com uma estatística de teste do tipo $\chi^2$ com k graus de liberdade em que k é o número de regressores do modelo.
+
+```{r}
+test1 <- sphtest(esp, data = dadosp, listw = w5, spatial.model = "error", method = "GM")
+test1
+
+```
+
+## Teste CD de Pesaran Global (cross-section dependence) - se as uniadades de corte transversais sao indpendentes ou nao espacialmente - eh um bom substituto para o teste I de Moran (CD de Pesaran) 
+# H0 É REJEITADA tem dependencia espacial 
+# hipótese nula: não dependência espacial entre as unidades de cross-section
+
+```{r}
+cd <- pcdtest(esp, test="cd",data=dadosp) # H0: ausencia de dependencia CS (cross-section)
+print(cd)
+```
+
+## CD de Pesaran Local:  leva em consideração um subconjunto apropriado de unidades vizinhas do cada crosssection, verificando a dependência espacial apenas entre os vizinhos utilizando uma matriz de peso espacial definida a priori. Essa eh a diferença do CD Pesaran Local com o Global
+#hipótese nula: não existe dependência espacial entre as unidades de cross-section
+
+```{r}
+CDp.pool<-pcdtest(plm(esp, data=dadosp, model="pooling"),listw=w5, test="cd")
+print(CDp.pool)
+```
+## Modelo OLS - efeito fixo
+
+```{r}
+modOLS <- plm(esp, data=dadosp)
+summary(modOLS)
+```
+
+#para salvar os residuos, se desejar:
+```{r}
+residuo<-resid(modOLS)
+write.csv(residuo,  file="C:/Users/Positivo/Desktop/EconometriaEspacial/AugustaRaiher/PainelEspacialguarda/residuopainel.csv", quote=F, row.names=F)
+```
+# depois de salvar os residuos, deve fazer o teste I Moran para ver qual melhor matriz.
+
+
+# escolha entre os Modelos Espaciais - Multiplicador de Lagrange SAR e SEM
+```{r}
+install.packages("slmtest", repos = "http://R-Forge.R-project.org")
+```
+
+
+```{r}
+slmtest(fe, listw=w5, test="lml")
+slmtest(fe, listw=w5, test="rlml")
+slmtest(fe, listw=w5, test="lme")
+slmtest(fe, listw=w5, test="rlme")
+```
+
+
+## SAR - EF - MV (Efeito Fixo - Max. Verossimilhanca)
+
+$y_t = \rho Wy_t + X_t \beta + \varepsilon_t $
+
+### SAR - Efeitos fixos (lag = true eh para defasar a variavel dependente). Time tem que colocoar o tamanho do seu periodo ### quiet=FALSE necessario p fazer o criterio de informação
+
+```{r}
+modSARef <- spml(esp, data=dadosp, listw=w5, lag=TRUE, model="within", effect="individual", spatial.error="none", quiet=FALSE) #Modelo SAR de Efeito Fixo
+summary(modSARef)
+# impSARef <- impacts(modSARef, listw=w5, time=2) #time = tempo (em anos) - deixei comentado por conta do erro do pacote
+summary(impSARef, zstats=TRUE, short=TRUE)
+
+# O valor (Function Value) constitui o Criterio de Informacao de Akaike (AIC)
+```
+
+
+# CRITERIO DE AKAIKE - PEGA O ULTIMO "function value:	 -1970.867" (VALOR LOGLIKE) QUE SAI LA EM CIMA QUANDO SE ESTIMA O MODELO SAR. PEGA ESSE VALOR E SUBSTITUI AQUI NO COMANDO:
+
+```{r}
+modSARef$logLik =-1970.867
+odSARef$logLik
+```
+
+
+```{r}
+# AIC and BIC function for splm object #
+AICsplm = function(object, k=2, criterion=c("AIC", "BIC")){
+sp = summary(object)
+l = sp$logLik
+np = length(coef(sp))
+N = nrow(sp$model)
+if (sp$effects=="sptpfe") {
+n = length(sp$res.eff[[1]]$res.sfe)
+T = length(sp$res.eff[[1]]$res.tfe)
+np = np+n+T
+}
+if (sp$effects=="spfe") {
+n = length(sp$res.eff[[1]]$res.sfe)
+np = np+n+1
+}
+if (sp$effects=="tpfe") {
+T = length(sp$res.eff[[1]]$res.tfe)
+np = np+T+1
+}
+if(criterion=="AIC"){
+aic = -2*l+k*np
+names(aic) = "AIC"
+return(aic)
+}
+if(criterion=="BIC"){
+bic = -2*l+log(N)*np
+names(bic) = "BIC"
+return(bic)
+}
+}
+```
+
+```{r}
+AICsplm (modSARef, criterion="AIC")
+```
+
+# SAR - EF- GMM (Efeito Fixo - Metodos dos Momentos Generalizados)
+
+```{r}
+modsarefgmm<-spgm(esp, data = dadosp, listw = w5, model = "within",lag = TRUE, spatial.error = FALSE,moments = " ivsplm")
+summary(modsarefgmm)
+
+```
+
+
+### SAR - Efeitos aleatorios - MV - 
+
+```{r}
+modSARea <- spml(esp, data=dadosp, listw=w5, lag=TRUE, model="random", effect="individual", spatial.error="none")
+summary(modSARea)
+impSARea <- impacts(modSARea, listw=w5, time=2)
+summary(impSARea, zstats=TRUE, short=TRUE)
+```
+
+# SAR - EA - GMM
+```{r}
+modSAReaGMM<-spgm(esp, data=dadosp, listw=w5, lag=TRUE, model="random",spatial.error = FALSE, moments = "ivsplm")
+summary(modSAReaGMM)
+```
+
+###SEM - # TEM QUE COLCOAR NO FINAL DO COMANDO "quiet=FALSE" PARA PODER EXTRAIR O LOGLIKE P/ O CRITERIO DE INFORMAÇÃO AKAIKE
+
+## SEM - EF - MV
+$y_t = X_t \beta + \xi_t \\ \xi_t = \lambda W \xi_t + \varepsilon_t$
+
+
+```{r}
+modSEMef <- spml(esp, data=dadosp, listw=w5, lag=FALSE, model="within", effect="individual", spatial.error="b", quiet=FALSE)
+summary(modSEMef)
+```
+
+
+# CRITERIO DE AKAIKE - PEGA O ULTIMO "function: " (VALOR LOGLIKE) QUE SAI LA ENCIMA QUANDO SE ESTIMA O MODELO SEM. AI PEGA ESSE VALOR E SUBSTITUI AQUI NO COMANDO:
+
+```{r}
+modSEMef$logLik =-1985.996
+modSEMef$logLik
+```
+
+
+```{r}
+# AIC and BIC function for splm object #
+AICsplm = function(object, k=2, criterion=c("AIC", "BIC")){
+sp = summary(object)
+l = sp$logLik
+np = length(coef(sp))
+N = nrow(sp$model)
+if (sp$effects=="sptpfe") {
+n = length(sp$res.eff[[1]]$res.sfe)
+T = length(sp$res.eff[[1]]$res.tfe)
+np = np+n+T
+}
+if (sp$effects=="spfe") {
+n = length(sp$res.eff[[1]]$res.sfe)
+np = np+n+1
+}
+if (sp$effects=="tpfe") {
+T = length(sp$res.eff[[1]]$res.tfe)
+np = np+T+1
+}
+if(criterion=="AIC"){
+aic = -2*l+k*np
+names(aic) = "AIC"
+return(aic)
+}
+if(criterion=="BIC"){
+bic = -2*l+log(N)*np
+names(bic) = "BIC"
+return(bic)
+}
+}
+```
+
+```{r}
+AICsplm (modSEMef, criterion="AIC")
+```
+## SEM - Efeito Aleatorio - MV  
+```{r}
+modSEMea <- spml(esp, data=dadosp, listw=w5, lag=FALSE, model="random", effect="individual", spatial.error="b")
+summary(modSEMea)
+```
+
+###NO TEXTO DOS AUTORES TEM GMM, OS INTERESSADOS IR E FAZER.
+
+## SAC - lembrando que rho eh lambda aqui neste pacote e lambda eh ro (quem criou inverteu)
+
+$y_t = \rho Wy_t + X_t \beta + \xi_t \\ \xi_t = \lambda W \xi_t + \varepsilon$
+
+```{r}
+modSAC <- spml(esp, data=dadosp, listw=w5, lag=TRUE, model="within", effect="individual", spatial.error="b")
+summary(modSAC)
+impSAC <- impacts(modSAC, listw=w5, time=2)
+summary(impSAC, zstats=TRUE, short=TRUE)
+```
+
+## Especificacao com lag
+
+```{r}
+esp_lag <- THEIL ~ RENDA + LAGRENDA
+```
+
+## SDM - MV
+
+$y_t = \rho Wy_t + X_t \beta + WX_t \theta + \varepsilon+t$
+
+```{r}
+modSDM <- spml(esp_lag, data=dadosp, listw=w5, lag=TRUE, model="within", effect="individual", spatial.error="none", quiet=FALSE)
+summary(modSDM)
+impSDM <- impacts(modSDM, listw=w5, time=2)
+summary(impSDM, zstats=TRUE, short=TRUE)
+```
+# CRITERIO DE AKAIKE - PEGA O ULTIMO "function value:	" (VALOR LOGLIKE) QUE SAI LA ENCIMA QUANDO SE ESTIMA O MODELO SAR. AI PEGA ESSE VALOR E SUBSTITUI AQUI NO COMANDO:
+
+```{r}
+modSDM$logLik =-1738.44
+modSDM$logLik
+```
+
+
+```{r}
+# AIC and BIC function for splm object #
+AICsplm = function(object, k=2, criterion=c("AIC", "BIC")){
+sp = summary(object)
+l = sp$logLik
+np = length(coef(sp))
+N = nrow(sp$model)
+if (sp$effects=="sptpfe") {
+n = length(sp$res.eff[[1]]$res.sfe)
+T = length(sp$res.eff[[1]]$res.tfe)
+np = np+n+T
+}
+if (sp$effects=="spfe") {
+n = length(sp$res.eff[[1]]$res.sfe)
+np = np+n+1
+}
+if (sp$effects=="tpfe") {
+T = length(sp$res.eff[[1]]$res.tfe)
+np = np+T+1
+}
+if(criterion=="AIC"){
+aic = -2*l+k*np
+names(aic) = "AIC"
+return(aic)
+}
+if(criterion=="BIC"){
+bic = -2*l+log(N)*np
+names(bic) = "BIC"
+return(bic)
+}
+}
+```
+
+```{r}
+AICsplm (modSDM, criterion="AIC")
+```
+# SDM - Efeito Fixo- GMM 
+
+```{r}
+modsarefgmm<-spgm(esp_lag, data = dadosp, listw = w5, model = "within",lag = TRUE, spatial.error = FALSE,moments = " ivsplm")
+summary(modsarefgmm)
+
+```
+## SDEM - MV
+
+$y_t = X_t \beta + WX_t \theta + \xi_t \\ \xi_t = \lambda W \xi_t + \varepsilon_t$
+
+```{r}
+modSDEM <- spml(esp_lag, data=dadosp, listw=w5, lag=FALSE, model="within", effect="individual", spatial.error="b", quiet = FALSE)
+summary(modSDEM)
+```
+
+# CRITERIO DE AKAIKE - PEGA O ULTIMO "function value:4" (VALOR LOGLIKE) QUE SAI LA ENCIMA QUANDO SE ESTIMA O MODELO SAR. AI PEGA ESSE VALOR E SUBSTITUI AQUI NO COMANDO:
+
+```{r}
+modSDM$logLik =-1746.859  
+modSDM$logLik
+```
+
+
+```{r}
+# AIC and BIC function for splm object
+AICsplm = function(object, k=2, criterion=c("AIC", "BIC")){
+sp = summary(object)
+l = sp$logLik
+np = length(coef(sp))
+N = nrow(sp$model)
+if (sp$effects=="sptpfe") {
+n = length(sp$res.eff[[1]]$res.sfe)
+T = length(sp$res.eff[[1]]$res.tfe)
+np = np+n+T
+}
+if (sp$effects=="spfe") {
+n = length(sp$res.eff[[1]]$res.sfe)
+np = np+n+1
+}
+if (sp$effects=="tpfe") {
+T = length(sp$res.eff[[1]]$res.tfe)
+np = np+T+1
+}
+if(criterion=="AIC"){
+aic = -2*l+k*np
+names(aic) = "AIC"
+return(aic)
+}
+if(criterion=="BIC"){
+bic = -2*l+log(N)*np
+names(bic) = "BIC"
+return(bic)
+}
+}
+```
+
+```{r}
+AICsplm (modSDM, criterion="AIC")
+```
+
+# Modelo SLX
+## Modelo OLS - Efeito Fixo - 
+
+```{r}
+modSLX <- plm(esp_lag, data=dadosp)
+summary(modSLX)
+vcov(modSLX)
+```
+
+###ADICIONAIS:
+
+##Outra especificação indica o modelo apenas com efeitos fixos individuais (na cross-section) (effect = "individual"), sem dependência espacial nos erros e na variável dependente. Os efeitos fixos são obtidos com a função effects.
+```{r}
+sarfeEIND <- spml(esp, data=dadosp, index = NULL, listw = w5, model="within", effect = "individual", method = "eigen", na.action = na.fail, quiet = TRUE, zero.policy = NULL, tol.solve = 1e-10, control = list(), legacy = FALSE )
+summary(sarfeEIND)
+```
+
+###O modelo pode ter efeitos fixos no tempo (effect = "time"). Os efeitos fixos no tempo podem ser extraídos pela função effects. 
+# Spatial error model with time period fixed effects
+```{r}
+semfemod <- spml(esp, data=dadosp, listw = w5,model="within", effect = "time", method = "eigen", na.action = na.fail, quiet = TRUE, zero.policy = NULL, tol.solve = 1e-10, control = list(), legacy = FALSE )
+summary(semfemod)
+```
